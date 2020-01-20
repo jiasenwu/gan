@@ -24,6 +24,7 @@ import functools
 import inspect
 
 import tensorflow as tf
+import tensorflow.compat.v1 as tf1
 
 from tensorflow_gan.python import contrib_utils as contrib
 from tensorflow_gan.python import namedtuples as tfgan_tuples
@@ -271,7 +272,8 @@ class TPUGANEstimator(tf.compat.v1.estimator.tpu.TPUEstimator):
             joint_train,
             is_on_tpu,
             gan_train_steps,
-            add_summaries=summary_types)
+            add_summaries=summary_types,
+            run_config=config)
       elif mode == tf.estimator.ModeKeys.EVAL:
         estimator_spec = get_eval_estimator_spec(
             gan_model_fns,
@@ -422,7 +424,7 @@ def _maybe_add_summaries(gan_model, add_summaries):
 
 def get_train_estimator_spec(gan_model_fns, loss_fns, gan_loss_kwargs,
                              optimizers, joint_train, is_on_tpu,
-                             gan_train_steps, add_summaries):
+                             gan_train_steps, add_summaries, run_config):
   """Estimator spec for train case."""
   # Construct optimizers if arguments are callable. This has to be done inside
   # the model_fn, since constructable optimizers might create tf.Variables that
@@ -435,8 +437,26 @@ def get_train_estimator_spec(gan_model_fns, loss_fns, gan_loss_kwargs,
       gan_model_fns, loss_fns, gan_loss_kwargs, optimizers, joint_train,
       gan_train_steps, add_summaries)
 
+
+  gs_1 = tf.reshape(tf1.train.get_global_step(), [1])
+  losses = tf1.get_collection_ref(tf1.GraphKeys.LOSSES)
+  loss_names = [l.name for l in losses]
+  losses = [tf.reshape(l, [1]) for l in losses]
+
+  def host_call_fn(step, *losses):
+    step = step[0]
+    with tf.summary.create_file_writer(
+        run_config.model_dir, 
+        max_queue=run_config.tpu_config.iterations_per_loop).as_default():
+      with tf.summary.record_if(True):
+        for n, l in zip(loss_names, losses):
+            tf.summary.scalar(n, tf.reduce_mean(l), step=step)
+        return tf1.summary.all_v2_summary_ops()
+
+  host_call = (host_call_fn, [gs_1] + losses)
+
   return tf.compat.v1.estimator.tpu.TPUEstimatorSpec(
-      mode=tf.estimator.ModeKeys.TRAIN, loss=scalar_loss, train_op=tpu_train_op)
+      mode=tf.estimator.ModeKeys.TRAIN, loss=scalar_loss, train_op=tpu_train_op, host_call=host_call)
 
 
 def _predictions_from_generator_output(generated_data):
